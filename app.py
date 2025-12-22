@@ -2,53 +2,67 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import japanize_matplotlib  # 日本語化ライブラリ
 from matplotlib.colors import ListedColormap
 from supabase import create_client, Client
 import random, math, time
 
 # --- A. 初期設定 ---
-st.set_page_config(layout="wide", page_title="WT Rank Battle Pro")
+st.set_page_config(layout="wide", page_title="WT Rank Battle Pro v3")
 supabase: Client = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 GRID_SIZE = 15
 df_master = pd.read_csv("units.csv")
 
-# --- B. 描画エンジン（名前表示・高低差・レーダー） ---
+# --- B. 描画エンジン（名前表示・視界制限・レーダー） ---
 
 def draw_tactical_map(grid, units, my_team):
     fig, ax = plt.subplots(figsize=(10, 10))
-    # 0:地, 1-5:ビル, 6:味方(ミント), 7:敵(赤)
+    # 0:地, 1-5:ビル, 6:味方(緑), 7:敵(赤)
     cmap = ListedColormap(['#8B4513', '#D3D3D3', '#A9A9A9', '#808080', '#696969', '#2F4F4F', '#00FF7F', '#FF4500'])
     
     display_map = grid.copy().astype(float)
+    my_active_units = [u for u in units if u['team'] == my_team and u.get('is_active')]
+
     for u in units:
-        if u.get('is_active', False):
+        if not u.get('is_active'): continue
+        
+        # 視界判定（味方は常に表示、敵は味方から距離5以内のみ表示）
+        is_visible = False
+        if u['team'] == my_team:
+            is_visible = True
+        else:
+            for my_u in my_active_units:
+                dist = math.sqrt((u['pos_x']-my_u['pos_x'])**2 + (u['pos_y']-my_u['pos_y'])**2)
+                if dist <= 5: # 目視範囲
+                    is_visible = True
+                    break
+
+        if is_visible:
             val = 6 if u['team'] == my_team else 7
             display_map[u['pos_x'], u['pos_y']] = val
-            # 【重要】駒の横に名前を常に表示
+            # ネームプレートの表示
             label_bg = '#00FF7F' if u['team'] == my_team else '#FF4500'
-            ax.text(u['pos_y'], u['pos_x'] - 0.6, u['unit_name'], color='white', fontsize=9, 
-                    fontweight='bold', ha='center', bbox=dict(facecolor=label_bg, alpha=0.8, boxstyle='round'))
+            ax.text(u['pos_y'], u['pos_x'] - 0.7, u['unit_name'], color='white', fontsize=10, 
+                    fontweight='bold', ha='center', bbox=dict(facecolor=label_bg, alpha=0.9, boxstyle='round'))
 
     ax.imshow(display_map, cmap=cmap, vmin=0, vmax=7, interpolation='nearest')
-    # ビルの高さを数値で表示
-    for i in range(GRID_SIZE):
-        for j in range(GRID_SIZE):
-            if grid[i, j] > 0:
-                ax.text(j, i, str(int(grid[i, j])), ha='center', va='center', color='black', alpha=0.3, fontsize=8)
     return fig
 
 def draw_radar(units, my_team):
+    """バッグワーム使用中の敵はレーダーから消える"""
     fig, ax = plt.subplots(figsize=(4, 4), facecolor='black')
     ax.set_facecolor('black')
     for u in units:
         if u.get('is_active', False):
-            color = '#00FF7F' if u['team'] == my_team else '#FF0000'
-            ax.scatter(u['pos_y'], u['pos_x'], c=color, s=80, edgecolors='white', alpha=0.8)
+            # 自分のチーム、またはバッグワームを使っていない敵だけ表示
+            if u['team'] == my_team or u.get('selected_sub') != 'バッグワーム':
+                color = '#00FF7F' if u['team'] == my_team else '#FF0000'
+                ax.scatter(u['pos_y'], u['pos_x'], c=color, s=80, edgecolors='white', alpha=0.8)
     ax.set_xlim(-0.5, 14.5); ax.set_ylim(14.5, -0.5); ax.axis('off')
     return fig
 
-# --- C. 戦闘解決エンジン（提示されたロジックを統合） ---
+# --- C. 戦闘解決エンジン ---
 
 def is_los_clear(u, e, grid):
     steps = max(abs(u['pos_x']-e['pos_x']), abs(u['pos_y']-e['pos_y']))
@@ -61,7 +75,7 @@ def is_los_clear(u, e, grid):
     return True
 
 def resolve_turn(my_team, enemy_team, mode, grid):
-    st.info("戦闘解決中...")
+    st.info("戦況を解決中...")
     units = supabase.table("unit_states").select("*").execute().data
     session = supabase.table("game_session").select("*").eq("id", 1).single().execute().data
     
@@ -69,31 +83,30 @@ def resolve_turn(my_team, enemy_team, mode, grid):
     my_pts = session.get('my_points', 0)
     en_pts = session.get('enemy_points', 0)
 
-    # 1. エスクードの先行処理
-    for u in units:
-        if u.get('is_active') and u.get('selected_main') == "エスクード":
-            tx, ty = u['pos_x'], u['pos_y']
-            grid[tx, ty] = min(5, grid[tx, ty] + 2)
-            logs.append(f"🛡️ {u['unit_name']} がエスクードを展開！壁が出現。")
-
-    # 2. 移動の反映 & CPU行動
+    # 1. 移動予約の適用
     for u in units:
         if not u.get('is_active'): continue
-        # プレイヤーの移動予約を反映
-        if u.get('team') == my_team or mode == "友人（オンライン）":
-            move = u.get('submitted_move')
-            if move:
-                u['pos_x'], u['pos_y'] = move.get('x', u['pos_x']), move.get('y', u['pos_y'])
-        
-        # CPU行動
-        elif mode == "コンピューター（CPU）" and u.get('team') == enemy_team:
+        move = u.get('submitted_move')
+        if move:
+            u['pos_x'] = move.get('x', u['pos_x'])
+            u['pos_y'] = move.get('y', u['pos_y'])
+
+    # 2. CPU行動
+    if mode == "コンピューター（CPU）":
+        for u in [u for u in units if u['team'] == enemy_team and u['is_active']]:
             targets = [t for t in units if t['team'] == my_team and t['is_active']]
             if targets:
                 target = random.choice(targets)
                 u['pos_x'] += (1 if target['pos_x'] > u['pos_x'] else -1 if target['pos_x'] < u['pos_x'] else 0)
                 u['pos_y'] += (1 if target['pos_y'] > u['pos_y'] else -1 if target['pos_y'] < u['pos_y'] else 0)
 
-    # 3. 攻撃計算 (3D距離・LoS・千佳補正)
+    # 3. エスクード展開
+    for u in units:
+        if u.get('is_active') and u.get('selected_main') == "エスクード":
+            grid[u['pos_x'], u['pos_y']] = min(5, grid[u['pos_x'], u['pos_y']] + 2)
+            logs.append(f"🛡️ {u['unit_name']} がエスクードを展開！")
+
+    # 4. 攻撃計算
     for u in [u for u in units if u.get('is_active')]:
         master = df_master[df_master['name'] == u['unit_name']].iloc[0]
         enemies = [e for e in units if e['team'] != u['team'] and e.get('is_active')]
@@ -116,7 +129,7 @@ def resolve_turn(my_team, enemy_team, mode, grid):
                         if u['team'] == my_team: my_pts += 1
                         else: en_pts += 1
 
-    # 4. DB一括更新
+    # 5. DB一括更新
     for u in units:
         supabase.table("unit_states").update({
             "hp": u['hp'], "pos_x": u['pos_x'], "pos_y": u['pos_y'], "is_active": u['is_active'], "submitted_move": None
@@ -130,16 +143,17 @@ def resolve_turn(my_team, enemy_team, mode, grid):
 
 # --- D. メイン UI ---
 
-st.title("🛰️ World Trigger Online Pro")
+st.title("🛰️ World Trigger Online Pro v3")
 
-# DBから最新情報取得
+# セッション・ユニットデータ取得
 session = supabase.table("game_session").select("*").eq("id", 1).single().execute().data
 live_units = supabase.table("unit_states").select("*").execute().data
 
 with st.sidebar:
     st.header(f"Turn {session['current_turn']} / 10")
-    st.metric("味方ポイント", session.get('my_points', 0))
-    st.metric("敵ポイント", session.get('enemy_points', 0))
+    c1, c2 = st.columns(2)
+    c1.metric("味方点", session.get('my_points', 0))
+    c2.metric("敵点", session.get('enemy_points', 0))
     
     my_team = st.selectbox("操作部隊", df_master['team'].unique(), index=1)
     enemy_team = st.selectbox("敵部隊", [t for t in df_master['team'].unique() if t != my_team])
@@ -164,7 +178,6 @@ col_map, col_cmd = st.columns([2, 1])
 with col_map:
     if 'grid' not in st.session_state: st.session_state.grid = np.random.randint(0, 4, (GRID_SIZE, GRID_SIZE))
     st.pyplot(draw_tactical_map(st.session_state.grid, live_units, my_team))
-    # ログ表示
     logs = supabase.table("battle_logs").select("*").order("id", desc=True).limit(5).execute().data
     for l in logs: st.caption(f"Turn {l['turn']}: {l['message']}")
 
@@ -184,8 +197,8 @@ with col_cmd:
                 supabase.table("unit_states").update({
                     "submitted_move": {"x": nx, "y": ny}, "selected_main": main_t, "selected_sub": sub_t
                 }).eq("unit_name", u['unit_name']).execute()
-                st.success("保存完了！")
+                st.success(f"{u['unit_name']} 保存！")
 
-    if st.button("🚨 全隊員の行動を解決（ターン進行）"):
+    if st.button("🚨 解決（ターン進行）"):
         resolve_turn(my_team, enemy_team, mode, st.session_state.grid)
         st.rerun()
