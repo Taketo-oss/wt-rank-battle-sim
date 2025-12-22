@@ -4,3 +4,4 @@ numpy
 matplotlib
 supabase
 japanize-matplotlib
+setuptools<74.0.0  # これを追加することで古い機能(distutils)を補います
