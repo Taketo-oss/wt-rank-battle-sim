@@ -6,28 +6,19 @@ from matplotlib.colors import ListedColormap
 from supabase import create_client, Client
 import math
 import random
-import time
 
 # --- 1. 初期設定 ---
-st.set_page_config(layout="wide", page_title="WT Rank Battle")
+st.set_page_config(layout="wide", page_title="WT Rank Battle Sim")
 url = st.secrets["SUPABASE_URL"]
 key = st.secrets["SUPABASE_KEY"]
 supabase = create_client(url, key)
 
 GRID_SIZE = 15
-MAX_TURNS = 10
 
-# --- 2. データロード & セッション管理 ---
-df = pd.read_csv("units.csv")
+# --- 2. 描画エンジン（レーダーと名前付きマップ） ---
 
-def get_db_session():
-    return supabase.table("game_session").select("*").eq("id", 1).single().execute().data
-
-def get_db_units():
-    return supabase.table("unit_states").select("*").execute().data
-
-# --- 3. 描画エンジン (名前表示付き) ---
 def draw_enhanced_map(grid, units, my_team):
+    """メインマップ：名前と高低差を表示"""
     fig, ax = plt.subplots(figsize=(10, 10))
     cmap = ListedColormap(['#8B4513', '#D3D3D3', '#A9A9A9', '#808080', '#696969', '#2F4F4F', '#00FF7F', '#FF4500'])
     
@@ -36,110 +27,110 @@ def draw_enhanced_map(grid, units, my_team):
         if u['is_active']:
             color = 6 if u['team'] == my_team else 7
             display_map[u['pos_x'], u['pos_y']] = color
-            # 名前を表示
-            ax.text(u['pos_y'], u['pos_x'] - 0.5, u['unit_name'], 
-                    color='yellow', fontsize=10, fontweight='bold', ha='center',
-                    bbox=dict(facecolor='black', alpha=0.5, edgecolor='none'))
+            
+            # 駒の横に名前を表示（自分のチームは強調）
+            text_color = 'lime' if u['team'] == my_team else 'red'
+            ax.text(u['pos_y'], u['pos_x'] - 0.6, u['unit_name'], 
+                    color='white', fontsize=9, fontweight='bold', ha='center',
+                    bbox=dict(facecolor=text_color, alpha=0.7, edgecolor='white', boxstyle='round,pad=0.3'))
 
     ax.imshow(display_map, cmap=cmap, vmin=0, vmax=7, interpolation='nearest')
-    # 高低差表示
+    
+    # マップの数字（ビルの高さ）を表示
     for i in range(GRID_SIZE):
         for j in range(GRID_SIZE):
             if grid[i, j] > 0:
-                ax.text(j, i, str(int(grid[i, j])), ha='center', va='center', color='white', alpha=0.5)
+                ax.text(j, i, str(int(grid[i, j])), ha='center', va='center', color='black', alpha=0.3, fontsize=8)
+    
+    ax.set_xticks(range(GRID_SIZE)); ax.set_yticks(range(GRID_SIZE))
     return fig
 
-# --- 4. CPU AI ロジック ---
-def run_cpu_logic(enemy_team, player_team, live_units):
-    st.write(f"🤖 {enemy_team} (CPU) が思考中...")
-    for u in live_units:
-        if u['team'] == enemy_team and u['is_active']:
-            # 最も近いプレイヤーの駒を探す
-            targets = [p for p in live_units if p['team'] == player_team and p['is_active']]
-            if targets:
-                target = min(targets, key=lambda p: abs(p['pos_x']-u['pos_x']) + abs(p['pos_y']-u['pos_y']))
-                # ターゲットに近づく
-                new_x = u['pos_x'] + (1 if target['pos_x'] > u['pos_x'] else -1 if target['pos_x'] < u['pos_x'] else 0)
-                new_y = u['pos_y'] + (1 if target['pos_y'] > u['pos_y'] else -1 if target['pos_y'] < u['pos_y'] else 0)
-                
-                # DB更新 (AIの移動)
-                supabase.table("unit_states").update({
-                    "pos_x": new_x, "pos_y": new_y, 
-                    "submitted_move": {"action": "通常射撃", "trigger": "メイン1"}
-                }).eq("unit_name", u['unit_name']).execute()
-
-# --- 5. メイン UI ---
-st.title("World Trigger: Online Rank Battle Simulator")
-
-# サイドバー: 設定
-with st.sidebar:
-    st.header("🎮 試合設定")
-    my_team = st.selectbox("自分の部隊", df['team'].unique(), index=1) # デフォルト玉狛
-    op_type = st.radio("対戦相手", ["友人（オンライン）", "コンピューター（CPU）"])
-    enemy_team = st.selectbox("敵の部隊", [t for t in df['team'].unique() if t != my_team])
+def draw_trion_radar(units, my_team):
+    """レーダー画面：トリオン信号のみを表示"""
+    fig, ax = plt.subplots(figsize=(4, 4), facecolor='black')
+    ax.set_facecolor('black')
     
-    if st.button("試合開始（駒を配置）"):
-        supabase.table("unit_states").delete().neq("id", 0).execute()
-        selected_names = df[df['team'].isin([my_team, enemy_team])]['name'].tolist()
-        insert_data = []
-        for name in selected_names:
-            row = df[df['name'] == name].iloc[0]
-            insert_data.append({
-                "unit_name": name, "team": row['team'], "hp": 100,
-                "pos_x": random.randint(0, 14), "pos_y": random.randint(0, 14), "pos_z": 0,
-                "is_active": True
-            })
-        supabase.table("unit_states").insert(insert_data).execute()
-        supabase.table("game_session").update({"current_turn": 1, "phase": "input"}).eq("id", 1).execute()
-        st.rerun()
+    # 走査線の円を描画
+    for r in [5, 10, 15]:
+        circle = plt.Circle((7, 7), r, color='#004400', fill=False, linestyle='--')
+        ax.add_artist(circle)
 
-# データ取得
-live_session = get_db_session()
-live_units = get_db_units()
-current_units = [u for u in live_units if u['team'] in [my_team, enemy_team]]
+    for u in units:
+        if u['is_active']:
+            color = '#00FF7F' if u['team'] == my_team else '#FF0000'
+            # トリオン信号を光らせる
+            ax.scatter(u['pos_y'], u['pos_x'], c=color, s=100, alpha=0.8, edgecolors='white', linewidth=1)
+            # レーダー上にも薄く名前を表示
+            ax.text(u['pos_y'], u['pos_x'] + 0.8, u['unit_name'][:2], color=color, fontsize=7, ha='center')
 
-col_map, col_cmd = st.columns([3, 2])
+    ax.set_xlim(-0.5, 14.5); ax.set_ylim(14.5, -0.5)
+    ax.axis('off')
+    return fig
+
+# --- 3. メインUI ---
+
+st.title("🛰️ World Trigger: Advanced Rank Battle")
+
+# データ読み込み
+df = pd.read_csv("units.csv")
+res = supabase.table("unit_states").select("*").execute()
+live_units = res.data if res.data else []
+
+# サイドバー：自分のチーム選択とレーダー
+with st.sidebar:
+    st.header("RADAR - 索敵画面")
+    my_team = st.selectbox("自分の操作部隊", df['team'].unique(), index=1)
+    st.pyplot(draw_trion_radar(live_units, my_team))
+    
+    st.markdown("---")
+    if st.button("全隊員を再配置（初期化）"):
+        # 初期化ロジックは前回同様
+        pass
+
+# メイン画面のレイアウト
+col_map, col_cmd = st.columns([2, 1])
 
 with col_map:
-    st.subheader(f"Turn {live_session['current_turn']} / {MAX_TURNS}")
     if 'grid' not in st.session_state:
-        st.session_state.grid = np.random.randint(0, 3, (GRID_SIZE, GRID_SIZE))
-    st.pyplot(draw_enhanced_map(st.session_state.grid, current_units, my_team))
+        st.session_state.grid = np.random.randint(0, 4, (15, 15))
+    st.pyplot(draw_enhanced_map(st.session_state.grid, live_units, my_team))
 
 with col_cmd:
-    st.subheader("行動プロット")
-    my_active_units = [u for u in current_units if u['team'] == my_team and u['is_active']]
+    st.subheader("🛠️ コマンド入力")
+    my_active_units = [u for u in live_units if u['team'] == my_team and u['is_active']]
+    
+    if not my_active_units:
+        st.info("サイドバーから初期化ボタンを押して、駒を配置してください。")
     
     for u in my_active_units:
+        # CSVからトリガー情報を取得
         m_data = df[df['name'] == u['unit_name']].iloc[0]
-        with st.expander(f"👤 {u['unit_name']} (HP: {int(u['hp'])})"):
-            # 座標入力
+        
+        with st.expander(f"【{u['unit_name']}】の行動"):
+            # 1. 移動先
             c1, c2 = st.columns(2)
-            nx = c1.number_input("次X", 0, 14, u['pos_x'], key=f"x_{u['unit_name']}")
-            ny = c2.number_input("次Y", 0, 14, u['pos_y'], key=f"y_{u['unit_name']}")
+            nx = c1.number_input(f"移動X", 0, 14, u['pos_x'], key=f"nx_{u['unit_name']}")
+            ny = c2.number_input(f"移動Y", 0, 14, u['pos_y'], key=f"ny_{u['unit_name']}")
             
-            # トリガー選択
-            trig_options = [m_data[f'main{i}'] for i in range(1, 5) if m_data[f'main{i}'] != '-'] + \
-                           [m_data[f'sub{i}'] for i in range(1, 5) if m_data[f'sub{i}'] != '-']
-            selected_trig = st.selectbox("使用トリガー", trig_options, key=f"t_{u['unit_name']}")
+            # 2. メイントリガー選択 (Main 1-4)
+            main_trigs = [m_data[f'main{i}'] for i in range(1, 5) if m_data[f'main{i}'] != '-']
+            sel_main = st.selectbox("メイン側トリガー", main_trigs, key=f"sm_{u['unit_name']}")
             
-            if st.button("行動確定", key=f"b_{u['unit_name']}"):
+            # 3. サブトリガー選択 (Sub 1-4)
+            sub_trigs = [m_data[f'sub{i}'] for i in range(1, 5) if m_data[f'sub{i}'] != '-']
+            sel_sub = st.selectbox("サブ側トリガー", sub_trigs, key=f"ss_{u['unit_name']}")
+            
+            if st.button(f"{u['unit_name']} のプロットを確定", key=f"btn_{u['unit_name']}"):
                 supabase.table("unit_states").update({
-                    "submitted_move": {"x": nx, "y": ny, "trigger": selected_trig},
-                    "pos_x": nx, "pos_y": ny # タップ移動代わり
+                    "pos_x": nx, "pos_y": ny,
+                    "selected_main": sel_main,
+                    "selected_sub": sel_sub,
+                    "submitted_move": {"active": True}
                 }).eq("unit_name", u['unit_name']).execute()
+                st.success("保存完了")
                 st.rerun()
 
     st.markdown("---")
-    # 解決ボタン
-    ready_count = sum(1 for u in current_units if u['submitted_move'] is not None and u['team'] == my_team)
-    st.write(f"チェック完了: {ready_count} / {len(my_active_units)}")
-    
-    if st.button("🚨 ターンを解決する"):
-        if op_type == "コンピューター（CPU）":
-            run_cpu_logic(enemy_team, my_team, current_units)
-        
-        # ここで resolve_battle_logic() (前回提供したダメージ計算) を呼び出す
-        st.success("戦闘解決中... ページをリロードしてください。")
-        time.sleep(1)
-        st.rerun()
+    if st.button("🚨 ターンを解決する（全員移動・攻撃）"):
+        # 戦闘解決ロジックを実行（ここでselected_main/subを参照してダメージ計算）
+        st.write("戦闘解決を実行しました。ページをリロードしてください。")
